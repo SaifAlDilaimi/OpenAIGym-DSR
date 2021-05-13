@@ -11,6 +11,7 @@ from gym import wrappers
 from tensorflow.keras import Model
 from tensorflow.keras import Sequential
 from tensorflow.keras.layers import Layer
+from tensorflow.keras.layers import Input
 from tensorflow.keras.layers import InputLayer
 from tensorflow.keras.layers import Activation
 from tensorflow.keras.layers import Conv2D
@@ -36,64 +37,77 @@ class DSRModel:
         self.num_units = 512
         self.num_outputs_regression = 1
 
-    def get_feature_extractor(self) -> Sequential:
-        model = Sequential(name="feature_extractor")
-        model.add(
-            Conv2D(
-                filters=8, kernel_size=[3, 3], strides=[2, 2],
-                padding='SAME', input_shape=(10, 10, 1))
+    def get_feature_extractor(self) -> Model:
+        feature_extractor_input = Input(shape=(100, 100, 1))
+        x = Conv2D(
+            filters=32, kernel_size=[8, 8], strides=[2, 2]
+        )(feature_extractor_input)
+        
+        x = Conv2D(filters=64, kernel_size=[4, 4], strides=[2, 2])(x)
+        x = Conv2D(filters=64, kernel_size=[3, 3], strides=[2, 2])(x)
+        x = Flatten()(x)
+        x = Dense(units=self.num_units, name="phi_state")(x)
+        
+        reward_regression = Dense(
+            units=self.num_outputs_regression, 
+            name="reward_regression"
+        )(x)
+
+        model = Model(
+            feature_extractor_input, 
+            reward_regression, 
+            name="feature_branch"
         )
-        model.add(
-            Conv2D(filters=16, kernel_size=[3, 3], strides=[2, 2])
-        )
-        model.add(Flatten())
-        model.add(Dense(units=self.num_units, name="phi_state"))
-        model.add(Dense(units=self.num_outputs_regression, name="reward_regression"))
+
         return model
 
     def get_deconv(self, input_layer: Layer) -> Sequential:
-        model = Sequential(name="deconv_decoder")
-        model.add(InputLayer(input_shape=input_layer.output_shape))
-        model.add(Reshape(target_shape=(8, 8, 4)))
-        model.add(
-            Conv2DTranspose(
-                filters=3, kernel_size=[3, 3], strides=[2, 2]
-            )
+        
+        deconv_input = Input(shape=input_layer.output_shape)
+        
+        x = Reshape(target_shape=[10, 10, 16])(deconv_input)
+        x = Conv2DTranspose(
+            filters=512, kernel_size=[4, 4], strides=[2, 2]
+        )(x)
+        x = Conv2DTranspose(
+            filters=256, kernel_size=[4, 4], strides=[2, 2]
+        )(x)
+        x = Conv2DTranspose(
+            filters=128, kernel_size=[4, 4], strides=[2, 2]
+        )(x)
+        x = Conv2DTranspose(
+            filters=64, kernel_size=[4, 4], strides=[2, 2]
+        )(x)
+
+        reconstruction = Conv2DTranspose(
+            filters=1, kernel_size=[4, 4], strides=[2, 2]
+        )(x)
+        
+        model = Model(
+            deconv_input, 
+            reconstruction, 
+            name="deconv_decoder"
         )
-        model.add(
-            Conv2DTranspose(
-                filters=3, kernel_size=[3, 3], strides=[2, 2]
-            )
-        )
-        model.add(Activation("tanh"))
         return model
 
-    def add_sr_layer(self, input_layer: Layer):
+    def add_sr_block(self, input_layer: Input, action: int):
         x = Dense(
             units=self.num_units,
         )(input_layer)
         x = Dense(units=256)(x)
         x = Dense(units=self.num_units)(x)
+        x = Dense(units=1, name=f'm_state_a{action}')(x)
         return x
 
-    def get_successor(self, input_layer) -> Sequential:
-        model = Sequential()
+    def get_successor(self, input_layer: Layer) -> Model:
+        output_layers = []
 
-        mu_list: List[Dense] = []
-        self.q: List[Dense] = []
+        successor_input = Input(shape=input_layer.output_shape)
 
-        for i in range(self.num_actions):
-            mu_list.append(self.add_sr_layer(input_layer))
+        for a in range(self.num_actions):
+            output_layers.append(self.add_sr_block(successor_input, action=a))
 
-            self.q.append(
-                Dense(
-                    units=1
-                )(mu_list[i])
-            )
-
-        stacked = Concatenate(axis=-1)([mu_list])
-        model.add(stacked)
-        # model.add(Reshape(target_shape=()))
+        model = Model(successor_input, output_layers, name="successor_branch")
 
         return model
 
@@ -108,6 +122,7 @@ class DSRModel:
 
         successor = self.get_successor(input_layer=phi_state_layer)
         successor.summary()
+        #tf.keras.utils.plot_model(successor, to_file="successor_branch.png")
 
         # model = Model(inputs=[extractor.layers[0]], outputs=[extractor.layers[-1]])
 
