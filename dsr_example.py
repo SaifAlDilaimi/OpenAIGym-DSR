@@ -37,19 +37,20 @@ class DSRModel:
         self.num_units = 512
         self.num_outputs_regression = 1
 
-    def get_feature_extractor(self) -> Model:
-        feature_extractor_input = Input(shape=(100, 100, 1))
+    def get_feature_extractor(self, input_shape: tuple) -> Model:
+        feature_extractor_input = Input(shape=input_shape)
         x = Conv2D(
             filters=32, kernel_size=[8, 8], strides=[2, 2]
         )(feature_extractor_input)
         
-        x = Conv2D(filters=64, kernel_size=[4, 4], strides=[2, 2])(x)
-        x = Conv2D(filters=64, kernel_size=[3, 3], strides=[2, 2])(x)
+        x = Conv2D(filters=64, kernel_size=4, strides=2)(x)
+        x = Conv2D(filters=64, kernel_size=3, strides=1)(x)
         x = Flatten()(x)
-        x = Dense(units=self.num_units, name="phi_state")(x)
+        x = Dense(units=512)(x)
+        x = Dense(units=256, name="phi_state")(x)
         
         reward_regression = Dense(
-            units=self.num_outputs_regression, 
+            units=1, 
             name="reward_regression"
         )(x)
 
@@ -58,73 +59,89 @@ class DSRModel:
             reward_regression, 
             name="feature_branch"
         )
+        model.summary()
+        
+        tf.keras.utils.plot_model(model, to_file="reward_regression.png", show_shapes=True)
 
         return model
 
-    def get_deconv(self, input_layer: Layer) -> Sequential:
+    def get_deconv(self, input_shape: tuple) -> Model:
         
-        deconv_input = Input(shape=input_layer.output_shape)
+        deconv_input = Input(shape=input_shape)
         
-        x = Reshape(target_shape=[10, 10, 16])(deconv_input)
+        x = Reshape(target_shape=[16, 16, 1])(deconv_input)
         x = Conv2DTranspose(
-            filters=512, kernel_size=[4, 4], strides=[2, 2]
+            filters=512, kernel_size=4, strides=1, padding="same", activation="relu"
         )(x)
         x = Conv2DTranspose(
-            filters=256, kernel_size=[4, 4], strides=[2, 2]
+            filters=256, kernel_size=4, strides=2, padding="same", activation="relu"
         )(x)
         x = Conv2DTranspose(
-            filters=128, kernel_size=[4, 4], strides=[2, 2]
+            filters=128, kernel_size=4, strides=2, padding="same", activation="relu"
         )(x)
         x = Conv2DTranspose(
-            filters=64, kernel_size=[4, 4], strides=[2, 2]
+            filters=64, kernel_size=4, strides=2, padding="same", activation="relu"
         )(x)
 
-        reconstruction = Conv2DTranspose(
-            filters=1, kernel_size=[4, 4], strides=[2, 2]
+        reconstruction = Conv2D(
+            filters=1, kernel_size=4, strides=2, padding="same"
         )(x)
-        
+
         model = Model(
             deconv_input, 
             reconstruction, 
             name="deconv_decoder"
         )
+        model.summary()
+
+        tf.keras.utils.plot_model(model, to_file="deconv_decoder.png", show_shapes=True)
+
         return model
 
     def add_sr_block(self, input_layer: Input, action: int):
         x = Dense(
-            units=self.num_units,
+            units=512,
         )(input_layer)
         x = Dense(units=256)(x)
-        x = Dense(units=self.num_units)(x)
+        x = Dense(units=256)(x)
         x = Dense(units=1, name=f'm_state_a{action}')(x)
         return x
 
-    def get_successor(self, input_layer: Layer) -> Model:
+    def get_successor(self, input_shape: tuple) -> Model:
         output_layers = []
 
-        successor_input = Input(shape=input_layer.output_shape)
+        successor_input = Input(shape=input_shape)
+        x = Dense(256)(successor_input)
 
         for a in range(self.num_actions):
-            output_layers.append(self.add_sr_block(successor_input, action=a))
+            output_layers.append(self.add_sr_block(x, action=a))
 
         model = Model(successor_input, output_layers, name="successor_branch")
+        model.summary()
+
+        tf.keras.utils.plot_model(model, to_file="successor_branch.png", show_shapes=True)
 
         return model
 
-
-    def create_feature_model(self, shape: tuple) -> Model:
-        extractor = self.get_feature_extractor()
-        extractor.summary()
+    def create_DSR_model(self, shape: tuple) -> Model:
+        state_img_input = Input(shape=shape)
+        extractor = self.get_feature_extractor(input_shape=shape)
         phi_state_layer = extractor.get_layer("phi_state")
+        phi_state_output_shape = phi_state_layer.output_shape
 
-        deconv = self.get_deconv(input_layer=phi_state_layer)
-        deconv.summary()
+        # Feature Extractor + Reward Regressor
+        self.reward_regression = extractor(state_img_input)
 
-        successor = self.get_successor(input_layer=phi_state_layer)
-        successor.summary()
-        #tf.keras.utils.plot_model(successor, to_file="successor_branch.png")
+        # State Reconstruction
+        deconv_decoder = self.get_deconv(input_shape=phi_state_output_shape)
+        self.deconv_decoder = deconv_decoder(phi_state_layer.output)
 
-        # model = Model(inputs=[extractor.layers[0]], outputs=[extractor.layers[-1]])
+        # SR Branch
+        successor_branch = self.get_successor(input_shape=phi_state_output_shape)
+        self.successor_branch = successor_branch(phi_state_layer.output)
+
+
+        
 
 
 class DQN:
@@ -253,8 +270,9 @@ def main():
     num_states = 10
     num_actions = 8
     learning_rate = 1e-3
+    img_shape = (64, 64, 1)
     m = DSRModel(num_states, num_actions, learning_rate)
-    m.create_feature_model(shape=(10, 10, 1))
+    m.create_DSR_model(shape=img_shape)
 
 
 if __name__ == '__main__':
