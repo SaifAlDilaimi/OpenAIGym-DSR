@@ -19,26 +19,24 @@ from tensorflow.keras.layers import Conv2DTranspose
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import Flatten
 from tensorflow.keras.layers import Reshape
-from tensorflow.keras.layers import Concatenate
-from tensorflow.keras.optimizers import SGD
+from tensorflow.keras.optimizers import RMSprop
+from tensorflow.keras.losses import mean_squared_error
 
 
 class DSRModel:
     def __init__(
         self, 
         num_states: int, 
-        num_actions: int, 
-        learning_rate: float,
+        num_actions: int,
+        img_shape: tuple
     ) -> None:
         super(DSRModel, self).__init__()
         self.num_states = num_states
         self.num_actions = num_actions
-        self.learning_rate = learning_rate
-        self.num_units = 512
-        self.num_outputs_regression = 1
+        self.img_shape = img_shape
 
-    def get_feature_extractor(self, input_shape: tuple) -> Model:
-        feature_extractor_input = Input(shape=input_shape)
+    def get_feature_extractor(self) -> Model:
+        feature_extractor_input = Input(shape=self.img_shape)
         x = Conv2D(
             filters=32, kernel_size=[8, 8], strides=[2, 2]
         )(feature_extractor_input)
@@ -47,21 +45,33 @@ class DSRModel:
         x = Conv2D(filters=64, kernel_size=3, strides=1)(x)
         x = Flatten()(x)
         x = Dense(units=512)(x)
-        x = Dense(units=256, name="phi_state")(x)
+        phi_state = Dense(units=256, name="phi_state")(x)
+
+        model = Model(
+            feature_extractor_input, 
+            phi_state, 
+            name="feature_branch"
+        )
+
+        return model
+
+    def get_reward_model(self, feature_extractor_model: Model) -> Model:
+        feature_extractor_input = feature_extractor_model.input
+        feature_extractor_output = feature_extractor_model.output
         
         reward_regression = Dense(
             units=1, 
             name="reward_regression"
-        )(x)
+        )(feature_extractor_output)
 
         model = Model(
             feature_extractor_input, 
             reward_regression, 
-            name="feature_branch"
+            name="reward_regression"
         )
         model.summary()
         
-        tf.keras.utils.plot_model(model, to_file="reward_regression.png", show_shapes=True)
+        model.compile(loss=mean_squared_error)
 
         return model
 
@@ -94,7 +104,7 @@ class DSRModel:
         )
         model.summary()
 
-        tf.keras.utils.plot_model(model, to_file="deconv_decoder.png", show_shapes=True)
+        model.compile(loss=mean_squared_error)
 
         return model
 
@@ -119,30 +129,29 @@ class DSRModel:
         model = Model(successor_input, output_layers, name="successor_branch")
         model.summary()
 
+        model.compile(loss=mean_squared_error)
+
         tf.keras.utils.plot_model(model, to_file="successor_branch.png", show_shapes=True)
 
         return model
 
-    def create_DSR_model(self, shape: tuple) -> Model:
-        state_img_input = Input(shape=shape)
-        extractor = self.get_feature_extractor(input_shape=shape)
-        phi_state_layer = extractor.get_layer("phi_state")
-        phi_state_output_shape = phi_state_layer.output_shape
+    def create_DSR_model(self) -> Model:
+        state_img_input = Input(shape=self.img_shape)
+        
+        feature_extractor = self.get_feature_extractor()
+        phi_state_output_shape = feature_extractor.output_shape
+        self.feature_extractor = feature_extractor(state_img_input)
 
         # Feature Extractor + Reward Regressor
-        self.reward_regression = extractor(state_img_input)
+        self.reward_regressor = self.get_reward_model(feature_extractor)
 
         # State Reconstruction
         deconv_decoder = self.get_deconv(input_shape=phi_state_output_shape)
-        self.deconv_decoder = deconv_decoder(phi_state_layer.output)
+        self.deconv_decoder = deconv_decoder(feature_extractor.output)
 
         # SR Branch
         successor_branch = self.get_successor(input_shape=phi_state_output_shape)
-        self.successor_branch = successor_branch(phi_state_layer.output)
-
-
-        
-
+        self.successor_branch = successor_branch(feature_extractor.output)
 
 class DQN:
     def __init__(
@@ -158,7 +167,7 @@ class DQN:
     ):
         self.num_actions = num_actions
         self.batch_size = batch_size
-        self.optimizer = tf.optimizers.Adam(lr)
+        self.optimizer = RMSprop(learning_rate=lr)
         self.gamma = gamma
         self.model = DSRModel(num_states, hidden_units, num_actions)
         self.experience = {'s': [], 'a': [], 'r': [], 's2': [], 'done': []}
@@ -271,8 +280,46 @@ def main():
     num_actions = 8
     learning_rate = 1e-3
     img_shape = (64, 64, 1)
-    m = DSRModel(num_states, num_actions, learning_rate)
-    m.create_DSR_model(shape=img_shape)
+    m = DSRModel(num_states, num_actions, img_shape)
+    m.create_DSR_model()
+
+def main2():    
+    env = gym.make('CartPole-v0')
+    gamma = 0.99
+    copy_step = 25
+    num_states = len(env.observation_space.sample())
+    num_actions = env.action_space.n
+    hidden_units = [200, 200]
+    max_experiences = 10000
+    min_experiences = 100
+    batch_size = 32
+    lr = 1e-2
+    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_dir = 'logs/dqn/' + current_time
+    summary_writer = tf.summary.create_file_writer(log_dir)
+
+    TrainNet = DQN(num_states, num_actions, hidden_units, gamma, max_experiences, min_experiences, batch_size, lr)
+    TargetNet = DQN(num_states, num_actions, hidden_units, gamma, max_experiences, min_experiences, batch_size, lr)
+    N = 50000
+    total_rewards = np.empty(N)
+    epsilon = 0.99
+    decay = 0.9999
+    min_epsilon = 0.1
+    for n in range(N):
+        epsilon = max(min_epsilon, epsilon * decay)
+        total_reward, losses = play_game(env, TrainNet, TargetNet, epsilon, copy_step)
+        total_rewards[n] = total_reward
+        avg_rewards = total_rewards[max(0, n - 100):(n + 1)].mean()
+        with summary_writer.as_default():
+            tf.summary.scalar('episode reward', total_reward, step=n)
+            tf.summary.scalar('running avg reward(100)', avg_rewards, step=n)
+            tf.summary.scalar('average loss)', losses, step=n)
+        if n % 100 == 0:
+            print("episode:", n, "episode reward:", total_reward, "eps:", epsilon, "avg reward (last 100):", avg_rewards,
+                  "episode loss: ", losses)
+    print("avg reward for last 100 episodes:", avg_rewards)
+    make_video(env, TrainNet)
+    env.close()
 
 
 if __name__ == '__main__':
