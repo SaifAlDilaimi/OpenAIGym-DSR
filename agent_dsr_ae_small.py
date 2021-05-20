@@ -425,14 +425,6 @@ class Agent(object):
                     replay_memory_batch_size
                 )
 
-            # q = self.model.GetQ(s1)
-            # q2 = np.max(self.model.GetQ(s2), axis=1)
-            # q[np.arange(q.shape[0]), a] = r + (1 - isterminal) * discount_factor * q2
-            # self.model.Learn(s1, q)
-            # print("action chosen", self.model.GetAction(s2).shape)
-            # print("replay size", a)
-            # mu[np.arange(mu.shape[0]), 512] = self.model.GetPhi(s1) + (1 - isterminal) * discount_factor * mu2
-            # print("s2", s2.shape)
             a = np.asarray(zip(np.arange(replay_memory_batch_size), a))
             mu = self.model.GetMU(s1, a)
             mu2 = self.model.GetMU(
@@ -492,20 +484,6 @@ class Agent(object):
         else:
             self.memory.Add(s, a, isterminal, reward)
 
-        #        if (iteration > 20000):
-        #            self.num_steps = self.num_steps or 50000
-        #            self.num_steps = int(self.num_steps / 2)
-
-        #            for i in range(self.num_steps):
-        #            self.LearnFromMemory(1)
-
-        #        else :
-        #            if (iteration % 2 == 0):
-        #            for i in range(5000):
-        #            self.LearnFromMemory(0)
-
-        #        else:
-        #            for i in range(5000):'''
         self.LearnFromMemory(1)
 
         if iteration % 5000 == 0:
