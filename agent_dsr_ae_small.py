@@ -214,13 +214,6 @@ class Model(object):
         )
 
         fc2 = tf.contrib.layers.fully_connected(self.fc1, num_outputs=1600)
-
-        '''deconv0 = tf.reshape(self.fc1, shape=[-1, 1, 1, 128])
-        deconv1 = tf.layers.conv2d_transpose(deconv0, filters=16, kernel_size=[4, 4], strides=[1,1])#, padding='VALID')
-        deconv2 = tf.layers.conv2d_transpose(deconv1, filters=8, kernel_size=[4, 4], strides=[2,2])#, padding='VALID')
-        deconv3 = tf.layers.conv2d_transpose(deconv2, filters=4, kernel_size=[4, 4], strides=[2,2], padding='SAME')
-        self.reconstruct = tf.layers.conv2d_transpose(deconv3, filters=3, kernel_size=[4, 4], strides=[2,2], activation=tf.nn.tanh, padding='SAME')'''
-
         deconv0 = tf.reshape(fc2, shape=[-1, 10, 10, 16])
         deconv1 = tf.contrib.layers.conv2d_transpose(
             deconv0, num_outputs=8, kernel_size=[3, 3], stride=[2, 2]
@@ -341,7 +334,6 @@ class Model(object):
         return self.session.run(self.r, feed_dict={self.s_: state})
 
     def GetAction(self, state):
-
         state = state.astype(np.float32)
         # state = state.reshape([replay_memory_batch_size] + list(resolution))
         return self.session.run(self.action, feed_dict={self.s_: state})[0][0]

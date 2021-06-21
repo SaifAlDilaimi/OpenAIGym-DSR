@@ -1,13 +1,16 @@
-import numpy as np
-import tensorflow as tf
+import os
 import cv2
 import matplotlib.pyplot as plt
-
+import numpy as np
+import tensorflow as tf
 from collections import deque
 from gym import wrappers
 from gym_minigrid.wrappers import *
+from tensorflow.keras import callbacks
 from tensorflow.keras import Model
-from tensorflow.keras.layers import Input
+from tensorflow.keras.utils import plot_model
+from tensorflow.keras.models import clone_model
+from tensorflow.keras.layers import Input, InputLayer
 from tensorflow.keras.layers import Conv2D
 from tensorflow.keras.layers import Conv2DTranspose
 from tensorflow.keras.layers import Dense
@@ -18,39 +21,49 @@ from tensorflow.keras.layers import Activation
 from tensorflow.keras.layers import ReLU
 from tensorflow.keras.optimizers import RMSprop
 from tensorflow.keras.losses import mean_squared_error
-
+from tensorflow.keras.initializers import HeNormal
+from tensorflow.keras.initializers import HeUniform
+from tensorflow.keras.initializers import GlorotUniform
+from tensorflow.keras.initializers import GlorotNormal
+from tensorflow.keras.regularizers import L2
 
 class DSRModel:
     def __init__(
         self,
         input_shape: tuple,
-        num_actions: int,
-        learning_rate: float,
-        momentum: float
+        num_actions: int
     ) -> None:
         super(DSRModel, self).__init__()
         self.input_shape = input_shape
         self.num_actions = num_actions
-        self.learning_rate = learning_rate
-        self.momentum = momentum
+        self.weight_initializer = GlorotNormal()
+        self.weight_regularizer = L2()
+        self.nb_phi_units = 256
 
-        self.create_DSR_model()
+        self.create_model()
 
     def get_feature_extractor(self) -> Model:
         feature_extractor_input = Input(shape=self.input_shape, name="Feature_Input")
+
         x = Conv2D(
-            filters=32, kernel_size=8, strides=2
+            filters=32, kernel_size=8, strides=2, 
+            kernel_initializer=self.weight_initializer
         )(feature_extractor_input)
         x = ReLU()(x)
-        
-        x = Conv2D(filters=64, kernel_size=4, strides=2)(x)
+        x = Conv2D(filters=64, kernel_size=4, strides=2, 
+            kernel_initializer=self.weight_initializer
+        )(x)
         x = ReLU()(x)
-        x = Conv2D(filters=64, kernel_size=3, strides=1)(x)
+        x = Conv2D(filters=64, kernel_size=3, strides=1, 
+            kernel_initializer=self.weight_initializer
+        )(x)
         x = ReLU()(x)
+
         x = Flatten()(x)
-        x = Dense(units=512)(x)
-        x = ReLU()(x)
-        phi_state = Dense(units=256, activation='relu', name="phi_state")(x)
+        phi_state = Dense(units=self.nb_phi_units, activation='tanh', 
+                    kernel_initializer=self.weight_initializer, 
+                    name="phi_state"
+        )(x)
 
         model = Model(
             feature_extractor_input, 
@@ -61,10 +74,11 @@ class DSRModel:
         return model
 
     def get_reward_model(self) -> Model:
-        feature_extractor_output = Input(shape=(256,))
+        feature_extractor_output = Input(shape=(self.nb_phi_units,))
         
         reward_regression = Dense(
-            units=1, 
+            units=1,
+            kernel_initializer=self.weight_initializer,
             name="reward_regressor"
         )(feature_extractor_output)
 
@@ -74,32 +88,33 @@ class DSRModel:
             name="model_r_regression"
         )
 
+
         return model
 
     def get_deconv(self) -> Model:
-        deconv_input = Input(shape=(256,), name="Deconv_Input")
+        deconv_input = Input(shape=(self.nb_phi_units,), name="Deconv_Input")
         
         x = Reshape(target_shape=[16, 16, 1])(deconv_input)
         x = Conv2DTranspose(
-            filters=512, kernel_size=4, strides=1, padding="same"
+            filters=512, kernel_size=4, strides=1,
+            kernel_initializer=self.weight_initializer, padding="same"
         )(x)
         x = ReLU()(x)
         x = Conv2DTranspose(
-            filters=256, kernel_size=4, strides=2, padding="same"
+            filters=256, kernel_size=4, strides=2,
+            kernel_initializer=self.weight_initializer, padding="same"
         )(x)
         x = ReLU()(x)
         x = Conv2DTranspose(
-            filters=128, kernel_size=4, strides=2, padding="same"
-        )(x)
-        x = ReLU()(x)
-        x = Conv2DTranspose(
-            filters=64, kernel_size=4, strides=1, padding="same"
+            filters=128, kernel_size=4, strides=2,
+            kernel_initializer=self.weight_initializer, padding="same"
         )(x)
         x = ReLU()(x)
 
         reconstruction = Conv2DTranspose(
-            filters=1, kernel_size=4, strides=1,
-            padding="same", name="state_reconstruction", activation="tanh"
+            filters=3, kernel_size=4, strides=1,
+            kernel_initializer=self.weight_initializer, padding="same",
+            activation="tanh", name="state_reconstruction"
         )(x)
 
         model = Model(
@@ -111,20 +126,23 @@ class DSRModel:
         return model
 
     def add_sr_block(self, input_layer: Input, action: int):
-        x = Dense(units=256)(input_layer)
+        x = Dense(units=self.nb_phi_units,
+            kernel_initializer=self.weight_initializer
+        )(input_layer)
         x = ReLU()(x)
-        x = Dense(units=512)(x)
+        x = Dense(units=self.nb_phi_units//2,
+            kernel_initializer=self.weight_initializer)(x)
         x = ReLU()(x)
-        x = Dense(units=256, name=f'm_state_a{action}')(x)
+        x = Dense(units=self.nb_phi_units, kernel_initializer=self.weight_initializer, 
+            name=f'm_state_a{action}'
+        )(x)
         return x
 
     def get_successor(self) -> Model:
         output_layers = []
 
-        successor_input = Input(shape=(256,), name="SR_Input")
-        x = Dense(512)(successor_input)
-        x = Activation('tanh')(x)
-        x_1_stop_grad = Lambda(lambda x: tf.stop_gradient(x))(x)
+        successor_input = Input(shape=(self.nb_phi_units,), name="SR_Input")
+        x_1_stop_grad = Lambda(lambda x1: tf.stop_gradient(x1))(successor_input)
 
         for a in range(self.num_actions):
             output_layers.append(self.add_sr_block(x_1_stop_grad, action=a))
@@ -133,7 +151,7 @@ class DSRModel:
 
         return model
 
-    def create_DSR_model(self) -> Model:
+    def create_model(self) -> Model:
         state_img_input = Input(shape=self.input_shape, name="Pipeline_start")
 
         # Feature Extractor 
@@ -148,162 +166,169 @@ class DSRModel:
         deconv_decoder_model = self.get_deconv()
         deconv_decoder_output = deconv_decoder_model(feature_extractor_output)
 
-        reward_deconv = Model(
-            inputs=[state_img_input],
-            outputs=[reward_regressor_output, deconv_decoder_output],
-            name="DSR_reward_deconv"
-        )
-        reward_deconv.compile(
-            loss={
-                'model_r_regression': mean_squared_error,
-                'model_decoder': mean_squared_error
-            },
-            optimizer=RMSprop(
-                learning_rate=self.learning_rate,
-                momentum=self.momentum
-            )
-        )
-
         # SR Branch
         successor_branch_model = self.get_successor()
         successor_branch_output = successor_branch_model(feature_extractor_output)
 
-        phi_successor = Model(
+        outputs = [reward_regressor_output, deconv_decoder_output, *successor_branch_output]
+
+        dsr = Model(
             inputs=[state_img_input],
-            outputs=[successor_branch_output],
-            name="DSR_phi_successor"
+            outputs=outputs,
+            name="DSR"
         )
 
-        phi_successor.compile(
-            loss=mean_squared_error,
-            optimizer=RMSprop(
-                learning_rate=self.learning_rate,
-                momentum=self.momentum
-            )
-        )
-
-        tf.keras.utils.plot_model(
-            reward_deconv,
-            to_file="model_reward_deconv.png",
-            show_shapes=True,
-            expand_nested=True)
-        tf.keras.utils.plot_model(
-            phi_successor, 
-            to_file="model_sr.png", 
-            show_shapes=True,
-            expand_nested=True)
-
-        self.reward_deconv = reward_deconv
-        self.sr = phi_successor
+        return dsr
 
 class DQN:
     def __init__(
         self,
         action_space: int,
         observation_shape: tuple,
+        memory_capacity: int = 10000, 
+        nb_episodes: int = 100, 
+        nb_steps: int = 50,
+        optimizer: RMSprop = None,
+        batch_size=32,
         gamma: float = 0.99,
         epsilon: float = 1.0,
-        epsilon_min: float = 0.1,
+        epsilon_min: float = 0.3,
         epsilon_decay: float = 0.995,
-        batch_size: int = 32,
-        lr: float = 2.5e-4,
-        momentum: float = 0.95,
-        memory_size: int = 1000000
+        nb_episodes_warmup: int = 100,
+        update_epsilon_episode: int = 1,
+        target_model_update: float = 1000,
+        tau: float = 5e-3,
+        verbose=False
     ) -> float:
-        self.action_space = action_space
+        self.nb_actions = action_space
         self.observation_shape = observation_shape
+
+        # prepare the memory for the RL agent
+        self.memory  = deque(maxlen=memory_capacity)
+        self.nonzero_memory  = deque(maxlen=memory_capacity)
+
+        # Setup the Params
+        self.nb_episodes = nb_episodes
+        self.nb_steps = nb_steps
         self.gamma = gamma
+        self.batch_size = batch_size
         self.epsilon = epsilon
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
-        self.batch_size = batch_size
-        self.lr = lr
-        self.momentum = momentum
-        self.memory  = deque(maxlen=memory_size)
-        self.nonzero_memory  = deque(maxlen=int(5e4))
-        self.tau = .125
+        self.nb_episodes_warmup = nb_episodes_warmup
+        self.target_model_update = target_model_update
+        self.update_epsilon_episode = update_epsilon_episode
+        self.tau = tau
+        self.optimizer = optimizer
+        self.steps_since_last_update = 0
+        self.verbose = verbose
+        # define the starting index of the SF output layers
+        self.sf_output_start_index = 2
 
+        self.build_model()
+
+    def build_model(
+        self,
+    ) -> None:
+        # build target model
         dsr = DSRModel(
-            input_shape=observation_shape, 
-            num_actions=action_space, 
-            learning_rate=lr,
-            momentum=momentum
+            input_shape=self.observation_shape,
+            num_actions=self.nb_actions
         )
-        dsr_target = DSRModel(
-            input_shape=observation_shape, 
-            num_actions=action_space, 
-            learning_rate=lr,
-            momentum=momentum
-        )
-        self.model_reward_deconv = dsr.reward_deconv
-        self.model_sr = dsr.sr
-        self.target_model_reward_deconv = dsr_target.reward_deconv
-        self.target_model_sr = dsr_target.sr
+        self.model_target = dsr.create_model()
 
+        def l2_norm(y_true, y_pred):
+            return tf.sqrt(tf.reduce_sum(tf.subtract(y_true, y_pred) ** 2))
+
+        loss_fn = {
+            'model_r_regression': mean_squared_error,
+            'model_decoder': l2_norm,
+            'successor_branch': mean_squared_error
+        }
+
+        for a in range(1, self.nb_actions):
+            loss_fn[f'successor_branch_{a}'] = mean_squared_error
+
+        self.model_target.compile(optimizer=self.optimizer, loss=loss_fn, metrics=['accuracy'])
+        # build online model by cloning the target model
+        self.model_online = clone_model(self.model_target)
+        self.model_online.compile(optimizer=self.optimizer, loss=loss_fn, metrics=['accuracy'])
+
+    def update_target_model_hard(self):
+        for l_sr, l_tg in zip(self.model_online.layers, self.model_target.layers):
+            wk0 = l_sr.get_weights()
+            l_tg.set_weights(wk0)
+        self.steps_since_last_update = 0
+
+    def update_target_model_soft(self):
+        for l_sr, l_tg in zip(self.model_online.layers, self.model_target.layers):
+            if type(l_sr) != InputLayer:
+                wk0 = l_sr.get_weights()
+                wk1 = l_tg.get_weights()
+                new_weights = []
+                for i in range(len(wk0)):
+                    wk1_ = self.tau * wk0[i] + (1.0 - self.tau) * wk1[i]
+                    new_weights.append(wk1_)
+                l_tg.set_weights(new_weights)
 
     def calculate_a_prime(
         self,
-        new_state: np.ndarray
+        state1_batch: np.ndarray
     ) -> int:
-        batch = np.array([new_state])
-
-        successor_features_next_state = self.model_sr.predict_on_batch(batch)
+        # Get only the outputs from model responsible for successor features
+        successor_features_state1 = self.model_online.predict_on_batch(state1_batch)[self.sf_output_start_index:]
         w = self.calculate_w()
 
-        Q_s = np.matmul(successor_features_next_state, w)[0]
-        a_prime = np.argmax(Q_s)
+        Q_s = np.matmul(successor_features_state1, w)
+        #a_prime = np.argmax(Q_s, axis=0)
+        # Get max action column-wise based on a 2D Matrix (due train on batch)
+        a_prime = np.where(Q_s == np.amax(Q_s, axis=0))
 
         return a_prime
 
     def calculate_w(
-        self
+        self,
+        use_target: bool = False
     ) -> np.ndarray:
-        feature_branch = self.model_reward_deconv.get_layer("feature_branch")
+        model = self.model_online
+        if use_target:
+            model = self.model_target
+        feature_branch = model.get_layer("feature_branch")
         phi_state_weights = feature_branch.get_layer("phi_state").get_weights()
         w = phi_state_weights[0][1] # 0 = weights (not bais), 1 = output weights
         return w
 
     def calculate_phi(
         self,
-        state: np.ndarray
+        state_batch: np.ndarray,
+        use_target: bool = False
     ) -> np.ndarray:
-        feature_branch = self.model_reward_deconv.get_layer("feature_branch")
-        phi_input = feature_branch.input
+        model = self.model_online
+        if use_target:
+            model = self.model_target
+        feature_branch = model.get_layer("feature_branch")
+        phi_input = feature_branch.inputs[0]
         phi_output = feature_branch.get_layer("phi_state").output
         
         phi_layer_model = Model(inputs=phi_input, outputs=phi_output)
-        phi_state = phi_layer_model(np.array([state])).numpy()
+        phi_states = phi_layer_model(state_batch)
 
-        return phi_state
+        return phi_states
 
     def calculate_target_r(
         self,
-        phi_state: np.ndarray
+        phi_states: np.ndarray,
+        use_target: bool = False
     ) -> np.ndarray:
-        w = self.calculate_w()
-        target_r = np.matmul(phi_state, w)
-        return target_r
-
-    def act(self, state):
-        if np.random.random() < self.epsilon:
-            return np.random.choice(self.action_space)
-
-        batch = np.array([state])
-
-        successor_features = self.model_sr.predict_on_batch(batch)[0]
-        w = self.calculate_w()
-
-        Q_s = np.matmul(successor_features, w)
-        print("Qs: ", Q_s)
-        a = np.argmax(Q_s)
-
-        return a
+        w = self.calculate_w(use_target=use_target)
+        target_r_batch = np.matmul(phi_states, w)
+        return target_r_batch
 
     def remember(self, state, action, reward, new_state, done):
         if reward == 10:
             self.nonzero_memory.append([state, action, reward, new_state, done])
-        else:
-            self.memory.append([state, action, reward, new_state, done])
+        
+        self.memory.append([state, action, reward, new_state, done])
 
     def sample_batch(
         self
@@ -312,7 +337,7 @@ class DQN:
 
         if np.random.random() <= 0.3:
             memory = self.nonzero_memory
-        
+
         sample_indicies = np.random.choice(len(memory), self.batch_size)
         samples = [memory[idx] for idx in sample_indicies]
 
@@ -320,69 +345,98 @@ class DQN:
 
     def memory_ready(self) -> bool:
         if (
-            len(self.memory) < self.batch_size * 2 
-            or len(self.nonzero_memory) < self.batch_size * 2
+            len(self.memory) < self.batch_size * 4 
+            or len(self.nonzero_memory) < self.batch_size * 4
         ): 
             return False
         else:
             return True
 
+    def select_action(
+        self,
+        state: np.ndarray,
+        epsilon: float = None
+    ) -> int:
+        if epsilon == None:
+            epsilon = self.epsilon
+
+        if np.random.random() < self.epsilon:
+            action = np.random.choice(self.nb_actions)
+            return action
+
+        batch = np.array([state])
+        successor_features = self.model_online.predict_on_batch(batch)[self.sf_output_start_index:]
+        w = self.calculate_w()
+        q_values = np.matmul(successor_features, w)
+        action = np.argmax(q_values)
+        
+        # if self.verbose:
+        #     print('-------------------------------------------------------')
+        #     print(f'Min/Max w: {np.min(w)}/{np.max(w)}')
+        #     print(f'Q-Values: {q_values}')
+        #     print(f'Selecting action based on successor features: {action}')
+        #     print('-------------------------------------------------------')
+
+        return action
+
     def replay(self):
+        '''
+        This function replays experiences to update the Q-function.
+        
+        | **Args**
+        | replayBatchSize:              The number of random that will be replayed.
+        '''
         if not self.memory_ready():
             return
 
-        self.epsilon *= self.epsilon_decay
-        self.epsilon = max(self.epsilon_min, self.epsilon)
+        experiences = self.sample_batch()
 
-        samples = self.sample_batch()
+        # Start by extracting the necessary parameters (we use a vectorized implementation).
+        state0_batch = []
+        reward_batch = []
+        action_batch = []
+        terminal1_batch = []
+        state1_batch = []
+        for e in experiences:
+            state, action, reward, new_state, done = e
+            state0_batch.append(state)
+            state1_batch.append(new_state)
+            reward_batch.append(reward)
+            action_batch.append(action)
+            terminal1_batch.append(1. if done else 0.)
 
-        for sample in samples:
-            state, action, reward, new_state, done = sample
-            batch_state = np.array([state])
-            batch_new_state = np.array([new_state])
+        state0_batch = np.array(state0_batch)
+        state1_batch = np.array(state1_batch)
+        reward_batch = np.array(reward_batch)
+        
+        phi_states0 = self.calculate_phi(state0_batch)
 
-            phi_state = self.calculate_phi(state)
-            target_sf_next_state = self.target_model_sr.predict_on_batch(batch_new_state)
-            a_prime = self.calculate_a_prime(new_state)
-            target_sf_next_state[0][a_prime] *= self.gamma
-            target_sf_next_state[0][a_prime] += phi_state
+        # Get only the successor features from the predictions
+        target_sf_state1_batch = self.model_target.predict_on_batch(state1_batch)[self.sf_output_start_index:]
+        target_sf_state1_batch = np.array(target_sf_state1_batch)
+        action_indicies, batch_indicies = self.calculate_a_prime(state1_batch)
+        # Update only the SF based on the actions & batches selected by a'
+        target_sf_state1_batch[action_indicies][batch_indicies] *= self.gamma
+        target_sf_state1_batch[action_indicies][batch_indicies] += phi_states0
 
-            target_r = self.calculate_target_r(phi_state)
+        target_r_batch = self.calculate_target_r(phi_states0)
 
-            if done:
-                target_r = reward
+        # If the experiences contain terminal states set the reward
+        terminal_indicies = np.argwhere(terminal1_batch == 1)
+        target_r_batch[terminal_indicies] = reward_batch[terminal_indicies]
 
-            self.model_sr.train_on_batch(batch_state, target_sf_next_state)
-            self.model_reward_deconv.train_on_batch(
-                x=batch_state, 
-                y={
-                    'model_r_regression': np.array([target_r]),
-                    'model_decoder': batch_state
-                }
-            )
+        losses = self.model_online.train_on_batch(
+            x=state0_batch, 
+            y=[target_r_batch, state0_batch, *target_sf_state1_batch]
+        )
 
-    def target_train(self):
-        for l_sr, l_tg in zip(self.model_sr.layers, self.target_model_sr.layers):
-            wk0 = l_sr.get_weights()
-            l_tg.set_weights(wk0)
-
-        for l_sr, l_tg in zip(self.model_reward_deconv.layers, self.target_model_reward_deconv.layers):
-            wk0 = l_sr.get_weights()
-            l_tg.set_weights(wk0)
-'''
-    def target_train(self):
-        weights_sr = self.model_sr.get_weights()
-        target_weights_sr = self.target_model_sr.get_weights()
-        for i in range(len(target_weights_sr)):
-            target_weights_sr[i] = weights_sr[i] * self.tau + target_weights_sr[i] * (1 - self.tau)
-        self.target_model_sr.set_weights(target_weights_sr)
-
-        weights_r_decoder = self.model_reward_deconv.get_weights()
-        target_weights_r_decoder = self.target_model_reward_deconv.get_weights()
-        for i in range(len(target_weights_r_decoder)):
-            target_weights_r_decoder[i] = weights_r_decoder[i] * self.tau + target_weights_r_decoder[i] * (1 - self.tau)
-        self.target_model_reward_deconv.set_weights(target_weights_r_decoder)
-'''
+        if self.target_model_update < 1.:
+            self.update_target_model_soft()
+        elif self.steps_since_last_update % self.target_model_update == 0:
+            print(f'Updating target model...')
+            self.update_target_model_hard()
+        
+        return losses
 
 def resize_img(img: np.array) -> np.array:
     # dsize
@@ -391,7 +445,8 @@ def resize_img(img: np.array) -> np.array:
     # resize image
     output = cv2.resize(img, dsize, interpolation = cv2.INTER_AREA)
     output = cv2.cvtColor(output, cv2.COLOR_BGR2GRAY)
-    output = np.reshape(output, newshape=(64, 64, 1))
+    output = np.reshape(output, newshape=(64, 64, 1))        
+    output = output.astype('float32')
     return output
 
 def collect_nonzero_samples(env, dqn_agent: DQN):
@@ -400,7 +455,7 @@ def collect_nonzero_samples(env, dqn_agent: DQN):
         cur_state = env.reset()
         cur_state = resize_img(cur_state)
         for _ in range(trial_len):
-            action = dqn_agent.act(cur_state)
+            action = dqn_agent.select_action(cur_state)
             new_state, reward, done, _ = env.step(action)
             new_state = resize_img(new_state)
 
@@ -419,40 +474,52 @@ def main():
     gamma = 0.99
     num_actions = 3
     img_shape = (64, 64, 1)
-    batch_size = 32
-    lr = 2.5e-4
+
+    # DSR Hyperparameter
+    nb_episodes = 2000
+    nb_steps = 50
+    learning_rate = 25e-4
+    batch_size = 16
     momentum = 0.95
-    n_episodes  = 400
-    n_steps = 255
+    min_epsilon = 0.3
+    nb_episodes_warmup = 1
+    target_model_update = 2000
+    update_epsilon_episode = 5
+    optimizer = RMSprop(learning_rate=learning_rate, momentum=momentum)
 
     dqn_agent = DQN(
         action_space=num_actions,
         observation_shape=img_shape,
+        nb_episodes=nb_episodes,
+        nb_steps=nb_steps,
+        nb_episodes_warmup=nb_episodes_warmup,
+        batch_size=batch_size,
+        epsilon_min=min_epsilon,
         gamma=gamma,
-        batch_size=batch_size, 
-        lr=lr,
-        momentum=momentum
+        target_model_update=target_model_update,
+        update_epsilon_episode=update_epsilon_episode,
+        optimizer=optimizer,
+        verbose=True
     )
     
     collect_nonzero_samples(env, dqn_agent)
     reward_per_episode = []
-    for episode in range(n_episodes):
-        print(f'Episode {episode}/{n_episodes}')
+    for episode in range(nb_episodes):
+        print(f'Episode {episode}/{nb_episodes}')
         episodic_reward = 0
         cur_state = env.reset()
         cur_state = resize_img(cur_state)
-        for step in range(n_steps):
-            action = dqn_agent.act(cur_state)
+        for step in range(nb_steps):
+            action = dqn_agent.select_action(cur_state)
             new_state, reward, done, _ = env.step(action)
             new_state = resize_img(new_state)
             
             episodic_reward += reward
-            print(f'Step {step}/{n_steps}; Agent Pos: {env.agent_pos}; Action: {action}, Reward: {reward}')
+            print(f'Step {step}/{nb_steps}; Agent Pos: {env.agent_pos}; Action: {action}, Reward: {reward}')
             
             dqn_agent.remember(cur_state, action, reward, new_state, done)
 
-            dqn_agent.replay()       # internally iterates default (prediction) model
-            dqn_agent.target_train() # iterates target model
+            dqn_agent.replay()
 
             cur_state = new_state
             if done:
@@ -460,7 +527,7 @@ def main():
                 break
         print(f'Episodic Reward: {episodic_reward}')
         reward_per_episode.append(episodic_reward)
-    print(f'Average Reward over {n_episodes}: {np.mean(reward_per_episode)}')
+    print(f'Average Reward over {nb_episodes}: {np.mean(reward_per_episode)}')
 
 if __name__ == '__main__':
     main()
