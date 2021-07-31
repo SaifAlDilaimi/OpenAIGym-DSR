@@ -237,12 +237,9 @@ class DQN:
         )
         self.model_target = dsr.create_model()
 
-        def l2_norm(y_true, y_pred):
-            return tf.sqrt(tf.reduce_sum(tf.subtract(y_true, y_pred) ** 2))
-
         loss_fn = {
             'model_r_regression': mean_squared_error,
-            'model_decoder': l2_norm,
+            'model_decoder': mean_squared_error,
             'successor_branch': mean_squared_error
         }
 
@@ -345,8 +342,8 @@ class DQN:
 
     def memory_ready(self) -> bool:
         if (
-            len(self.memory) < self.batch_size * 4 
-            or len(self.nonzero_memory) < self.batch_size * 4
+            len(self.memory) < self.batch_size * 2 
+            or len(self.nonzero_memory) < self.batch_size * 2
         ): 
             return False
         else:
